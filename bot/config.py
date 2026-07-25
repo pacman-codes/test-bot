@@ -49,6 +49,3 @@ class Settings(BaseSettings):
             return None
         normalized = str(value).strip().lstrip("@")
         return normalized or None
-
-
-settings = Settings()
