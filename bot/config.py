@@ -17,8 +17,14 @@ class Settings(BaseSettings):
     @field_validator("admin_ids", mode="before")
     @classmethod
     def parse_admin_ids(cls, value: object) -> frozenset[int]:
+        if isinstance(value, int):
+            return frozenset({value})
         if isinstance(value, str):
-            return frozenset(int(item.strip()) for item in value.split(",") if item.strip())
+            return frozenset(
+                int(item.strip())
+                for item in value.split(",")
+                if item.strip()
+            )
         return frozenset(value)  # type: ignore[arg-type]
 
 
