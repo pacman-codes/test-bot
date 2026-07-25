@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from html import escape
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -36,7 +37,7 @@ def subscription_keyboard(url: str) -> InlineKeyboardMarkup:
 def support_text(settings: Settings) -> str:
     if settings.support_username:
         username = settings.support_username
-        return f'Поддержка: <a href="https://t.me/{username}">@{username}</a>'
+        return f'Поддержка: <a href="https://t.me/{username}">@{escape(username)}</a>'
     return "По вопросам оплаты напиши владельцу бота."
 
 
@@ -44,6 +45,11 @@ async def remember_user(message: Message, db: Database) -> None:
     user = message.from_user
     if user:
         await db.upsert_user(user.id, user.username, user.first_name)
+
+
+async def remember_callback_user(callback: CallbackQuery, db: Database) -> None:
+    user = callback.from_user
+    await db.upsert_user(user.id, user.username, user.first_name)
 
 
 async def edit_message(
@@ -70,7 +76,7 @@ async def start(message: Message, db: Database) -> None:
     await remember_user(message, db)
     await db.set_step(user.id, "welcome", event="start")
     await message.answer(
-        f"<b>Привет, {user.first_name}!</b> 👋\n\n"
+        f"<b>Привет, {escape(user.first_name)}!</b> 👋\n\n"
         "Здесь находится закрытый канал с материалами и обновлениями, "
         "которых нет в открытом доступе.\n\n"
         "Покажу, что внутри, и затем ты сам решишь, нужен ли доступ.",
@@ -80,10 +86,11 @@ async def start(message: Message, db: Database) -> None:
 
 @router.callback_query(F.data == "funnel:start")
 async def show_start(callback: CallbackQuery, db: Database) -> None:
+    await remember_callback_user(callback, db)
     await db.set_step(callback.from_user.id, "welcome")
     await edit_message(
         callback,
-        f"<b>Привет, {callback.from_user.first_name}!</b> 👋\n\n"
+        f"<b>Привет, {escape(callback.from_user.first_name)}!</b> 👋\n\n"
         "Здесь находится закрытый канал с материалами и обновлениями, "
         "которых нет в открытом доступе.\n\n"
         "Покажу, что внутри, и затем ты сам решишь, нужен ли доступ.",
@@ -93,6 +100,7 @@ async def show_start(callback: CallbackQuery, db: Database) -> None:
 
 @router.callback_query(F.data == "funnel:inside")
 async def show_inside(callback: CallbackQuery, db: Database) -> None:
+    await remember_callback_user(callback, db)
     await db.set_step(callback.from_user.id, "inside", event="inside_view")
     await edit_message(
         callback,
@@ -111,6 +119,7 @@ async def show_inside(callback: CallbackQuery, db: Database) -> None:
 
 @router.callback_query(F.data == "funnel:why")
 async def show_why(callback: CallbackQuery, db: Database) -> None:
+    await remember_callback_user(callback, db)
     await db.set_step(callback.from_user.id, "why", event="why_view")
     await edit_message(
         callback,
@@ -128,6 +137,7 @@ async def show_why(callback: CallbackQuery, db: Database) -> None:
 
 @router.callback_query(F.data == "funnel:offer")
 async def show_offer(callback: CallbackQuery, db: Database, settings: Settings) -> None:
+    await remember_callback_user(callback, db)
     await db.set_step(callback.from_user.id, "offer", event="offer_view")
     await edit_message(
         callback,
@@ -152,6 +162,7 @@ async def create_subscription_link(
     subscriptions: SubscriptionLinkService,
     settings: Settings,
 ) -> None:
+    await remember_callback_user(callback, db)
     await db.set_step(
         callback.from_user.id,
         "subscription_link",
@@ -223,6 +234,6 @@ async def refresh_link(
     try:
         await subscriptions.get_or_create(force=True)
     except SubscriptionLinkError as exc:
-        await message.answer(f"Не удалось обновить ссылку: <code>{exc}</code>")
+        await message.answer(f"Не удалось обновить ссылку: <code>{escape(str(exc))}</code>")
         return
     await message.answer("Новая платная ссылка создана и сохранена.")
