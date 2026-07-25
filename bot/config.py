@@ -1,13 +1,14 @@
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     bot_token: str
     private_channel_id: int
-    admin_ids: frozenset[int] = frozenset()
+    admin_ids: Annotated[frozenset[int], NoDecode] = frozenset()
     database_path: Path = Path("data/bot.sqlite3")
     subscription_price_stars: int = 150
     subscription_link_name: str = "Закрытый канал"
