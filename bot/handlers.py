@@ -1,19 +1,71 @@
 from __future__ import annotations
 
-from aiogram import Bot, F, Router
-from aiogram.filters import Command, CommandObject, CommandStart
+import logging
+from html import escape
+
+from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.config import Settings
 from bot.db import Database
+from bot.subscriptions import SubscriptionLinkError, SubscriptionLinkService
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 
-def keyboard(*rows: tuple[str, str]) -> InlineKeyboardMarkup:
+def callback_keyboard(*rows: tuple[str, str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=data)] for text, data in rows]
+        inline_keyboard=[
+            [InlineKeyboardButton(text=text, callback_data=callback_data)]
+            for text, callback_data in rows
+        ]
     )
+
+
+def subscription_keyboard(url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Перейти к оплате", url=url)],
+            [InlineKeyboardButton(text="Назад", callback_data="funnel:offer")],
+        ]
+    )
+
+
+def support_text(settings: Settings) -> str:
+    if settings.support_username:
+        username = settings.support_username
+        return f'Поддержка: <a href="https://t.me/{username}">@{escape(username)}</a>'
+    return "По вопросам оплаты напиши владельцу бота."
+
+
+async def remember_user(message: Message, db: Database) -> None:
+    user = message.from_user
+    if user:
+        await db.upsert_user(user.id, user.username, user.first_name)
+
+
+async def remember_callback_user(callback: CallbackQuery, db: Database) -> None:
+    user = callback.from_user
+    await db.upsert_user(user.id, user.username, user.first_name)
+
+
+async def edit_message(
+    callback: CallbackQuery,
+    text: str,
+    reply_markup: InlineKeyboardMarkup,
+) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+    await callback.answer()
 
 
 @router.message(CommandStart())
@@ -21,123 +73,167 @@ async def start(message: Message, db: Database) -> None:
     user = message.from_user
     if not user:
         return
-    await db.upsert_user(user.id, user.username, user.first_name)
-    await db.set_step(user.id, "welcome")
+    await remember_user(message, db)
+    await db.set_step(user.id, "welcome", event="start")
     await message.answer(
-        f"Привет, {user.first_name}! 👋\n\n"
-        "Здесь находится закрытое сообщество с материалами и обновлениями, "
-        "которых нет в открытом доступе.",
-        reply_markup=keyboard(("Что внутри?", "funnel:inside")),
+        f"<b>Привет, {escape(user.first_name)}!</b> 👋\n\n"
+        "Здесь находится закрытый канал с материалами и обновлениями, "
+        "которых нет в открытом доступе.\n\n"
+        "Покажу, что внутри, и затем ты сам решишь, нужен ли доступ.",
+        reply_markup=callback_keyboard(("Посмотреть, что внутри", "funnel:inside")),
+    )
+
+
+@router.callback_query(F.data == "funnel:start")
+async def show_start(callback: CallbackQuery, db: Database) -> None:
+    await remember_callback_user(callback, db)
+    await db.set_step(callback.from_user.id, "welcome")
+    await edit_message(
+        callback,
+        f"<b>Привет, {escape(callback.from_user.first_name)}!</b> 👋\n\n"
+        "Здесь находится закрытый канал с материалами и обновлениями, "
+        "которых нет в открытом доступе.\n\n"
+        "Покажу, что внутри, и затем ты сам решишь, нужен ли доступ.",
+        callback_keyboard(("Посмотреть, что внутри", "funnel:inside")),
     )
 
 
 @router.callback_query(F.data == "funnel:inside")
 async def show_inside(callback: CallbackQuery, db: Database) -> None:
-    await callback.answer()
-    if not callback.from_user:
-        return
-    await db.set_step(callback.from_user.id, "inside")
-    await callback.message.edit_text(
-        "Внутри канала:\n\n"
+    await remember_callback_user(callback, db)
+    await db.set_step(callback.from_user.id, "inside", event="inside_view")
+    await edit_message(
+        callback,
+        "<b>Что находится внутри</b>\n\n"
         "• практические материалы без воды;\n"
         "• регулярные обновления;\n"
-        "• разборы и дополнительные публикации;\n"
-        "• доступ ко всему архиву сразу.",
-        reply_markup=keyboard(("Посмотреть условия", "funnel:offer")),
+        "• разборы и готовые решения;\n"
+        "• доступ ко всему архиву сразу.\n\n"
+        "Вместо бесконечной ленты — компактная база, к которой можно возвращаться.",
+        callback_keyboard(
+            ("Почему канал закрытый", "funnel:why"),
+            ("Назад", "funnel:start"),
+        ),
+    )
+
+
+@router.callback_query(F.data == "funnel:why")
+async def show_why(callback: CallbackQuery, db: Database) -> None:
+    await remember_callback_user(callback, db)
+    await db.set_step(callback.from_user.id, "why", event="why_view")
+    await edit_message(
+        callback,
+        "<b>Почему канал закрытый</b>\n\n"
+        "Материалы выходят для небольшой аудитории, поэтому их можно делать "
+        "конкретнее и полезнее.\n\n"
+        "Без рекламы, гонки за охватами и случайных публикаций — только системный архив "
+        "и новые материалы по теме.",
+        callback_keyboard(
+            ("Посмотреть условия", "funnel:offer"),
+            ("Назад", "funnel:inside"),
+        ),
     )
 
 
 @router.callback_query(F.data == "funnel:offer")
 async def show_offer(callback: CallbackQuery, db: Database, settings: Settings) -> None:
-    await callback.answer()
-    await db.set_step(callback.from_user.id, "offer")
-    await callback.message.edit_text(
-        "Доступ к закрытому каналу\n\n"
-        f"Стоимость: {settings.subscription_price_rub} ₽\n"
-        f"Срок доступа: {settings.subscription_days} дней\n\n"
-        "После оплаты бот отправит персональную ссылку для входа.",
-        reply_markup=keyboard(("Оформить подписку", "payment:create"), ("Назад", "funnel:inside")),
+    await remember_callback_user(callback, db)
+    await db.set_step(callback.from_user.id, "offer", event="offer_view")
+    await edit_message(
+        callback,
+        "<b>Доступ к закрытому каналу</b>\n\n"
+        f"Стоимость: <b>{settings.subscription_price_stars} ⭐ в месяц</b>.\n\n"
+        "После оплаты Telegram сразу добавит тебя в канал. Подписка продлевается "
+        "каждые 30 дней, отменить её можно в настройках Telegram.",
+        callback_keyboard(
+            (
+                f"Оформить подписку — {settings.subscription_price_stars} ⭐",
+                "subscription:create",
+            ),
+            ("Назад", "funnel:why"),
+        ),
     )
 
 
-@router.callback_query(F.data == "payment:create")
-async def create_payment_request(
-    callback: CallbackQuery, db: Database, settings: Settings, bot: Bot
+@router.callback_query(F.data == "subscription:create")
+async def create_subscription_link(
+    callback: CallbackQuery,
+    db: Database,
+    subscriptions: SubscriptionLinkService,
+    settings: Settings,
 ) -> None:
-    await callback.answer()
-    user = callback.from_user
-    await db.set_step(user.id, "payment_pending")
-    await db.set_payment_status(user.id, "pending")
-    await callback.message.edit_text(
-        "Заявка создана ✅\n\n"
-        "На этапе MVP оплата подтверждается администратором вручную. "
-        "После подтверждения ссылка придёт сюда автоматически."
+    await remember_callback_user(callback, db)
+    await db.set_step(
+        callback.from_user.id,
+        "subscription_link",
+        event="subscription_link_requested",
     )
-    username = f"@{user.username}" if user.username else "без username"
-    for admin_id in settings.admin_ids:
-        await bot.send_message(
-            admin_id,
-            "Новая заявка на подписку\n\n"
-            f"Пользователь: {user.full_name} ({username})\n"
-            f"Telegram ID: <code>{user.id}</code>\n\n"
-            f"Подтвердить: <code>/approve {user.id}</code>\n"
-            f"Отклонить: <code>/reject {user.id}</code>",
+    await callback.answer("Готовлю ссылку…")
+
+    try:
+        url = await subscriptions.get_or_create()
+    except SubscriptionLinkError:
+        logger.exception("Could not prepare a subscription link for %s", callback.from_user.id)
+        if isinstance(callback.message, Message):
+            await callback.message.answer(
+                "Не получилось подготовить ссылку на подписку. Попробуй ещё раз или "
+                f"обратись в поддержку.\n\n{support_text(settings)}"
+            )
+        return
+
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "<b>Ссылка готова</b>\n\n"
+            "Нажми кнопку ниже. Telegram покажет условия и добавит тебя в канал "
+            "сразу после оплаты.",
+            reply_markup=subscription_keyboard(url),
         )
 
 
-@router.message(Command("approve"))
-async def approve(
-    message: Message, command: CommandObject, db: Database, settings: Settings, bot: Bot
+@router.message(Command("help"))
+async def help_command(message: Message) -> None:
+    await message.answer(
+        "<b>Команды</b>\n\n"
+        "/start — начать сначала\n"
+        "/help — помощь\n"
+        "/paysupport — вопрос по оплате"
+    )
+
+
+@router.message(Command("paysupport"))
+async def payment_support(message: Message, settings: Settings) -> None:
+    await message.answer(support_text(settings))
+
+
+@router.message(Command("stats"))
+async def stats(message: Message, db: Database, settings: Settings) -> None:
+    if not message.from_user or message.from_user.id not in settings.admin_ids:
+        return
+
+    data = await db.get_stats()
+    await message.answer(
+        "<b>Статистика воронки</b>\n\n"
+        f"Запустили бота: <b>{data.total_users}</b>\n"
+        f"Посмотрели содержимое: <b>{data.reached_inside}</b> "
+        f"({data.percent(data.reached_inside, data.total_users):.1f}%)\n"
+        f"Дошли до оффера: <b>{data.reached_offer}</b> "
+        f"({data.percent(data.reached_offer, data.total_users):.1f}%)\n"
+        f"Запросили ссылку: <b>{data.requested_subscription}</b> "
+        f"({data.percent(data.requested_subscription, data.total_users):.1f}%)"
+    )
+
+
+@router.message(Command("refresh_link"))
+async def refresh_link(
+    message: Message,
+    subscriptions: SubscriptionLinkService,
+    settings: Settings,
 ) -> None:
     if not message.from_user or message.from_user.id not in settings.admin_ids:
         return
-    args = (command.args or "").split()
-    if not args or not args[0].isdigit():
-        await message.answer("Формат: /approve <telegram_id> [days]")
+    try:
+        await subscriptions.get_or_create(force=True)
+    except SubscriptionLinkError as exc:
+        await message.answer(f"Не удалось обновить ссылку: <code>{escape(str(exc))}</code>")
         return
-    telegram_id = int(args[0])
-    days = int(args[1]) if len(args) > 1 and args[1].isdigit() else settings.subscription_days
-    user = await db.get_user(telegram_id)
-    if not user:
-        await message.answer("Пользователь не найден.")
-        return
-    until = await db.activate_subscription(telegram_id, days)
-    invite = await bot.create_chat_invite_link(
-        chat_id=settings.private_channel_id,
-        member_limit=1,
-        name=f"subscription-{telegram_id}",
-    )
-    await bot.send_message(
-        telegram_id,
-        "Оплата подтверждена ✅\n\n"
-        f"Подписка активирована на {days} дней.\n"
-        f"Персональная ссылка для входа:\n{invite.invite_link}\n\n"
-        "Ссылка одноразовая — не пересылай её другим.",
-    )
-    await message.answer(f"Готово. Подписка активна до {until}.")
-
-
-@router.message(Command("reject"))
-async def reject(message: Message, command: CommandObject, db: Database, settings: Settings, bot: Bot) -> None:
-    if not message.from_user or message.from_user.id not in settings.admin_ids:
-        return
-    value = (command.args or "").strip()
-    if not value.isdigit():
-        await message.answer("Формат: /reject <telegram_id>")
-        return
-    telegram_id = int(value)
-    await db.set_payment_status(telegram_id, "rejected")
-    await bot.send_message(telegram_id, "Заявка отклонена. Напиши администратору, если это ошибка.")
-    await message.answer("Заявка отклонена.")
-
-
-@router.message(Command("status"))
-async def status(message: Message, command: CommandObject, db: Database, settings: Settings) -> None:
-    if not message.from_user or message.from_user.id not in settings.admin_ids:
-        return
-    value = (command.args or "").strip()
-    if not value.isdigit():
-        await message.answer("Формат: /status <telegram_id>")
-        return
-    user = await db.get_user(int(value))
-    await message.answer(f"<pre>{user}</pre>" if user else "Пользователь не найден.")
+    await message.answer("Новая платная ссылка создана и сохранена.")
