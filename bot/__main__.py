@@ -7,7 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
-from bot.config import settings
+from bot.config import Settings
 from bot.db import Database
 from bot.handlers import router
 from bot.subscriptions import SubscriptionLinkService
@@ -15,7 +15,7 @@ from bot.subscriptions import SubscriptionLinkService
 logger = logging.getLogger(__name__)
 
 
-async def notify_admins(bot: Bot, text: str) -> None:
+async def notify_admins(bot: Bot, settings: Settings, text: str) -> None:
     for admin_id in settings.admin_ids:
         with suppress(Exception):
             await bot.send_message(admin_id, text)
@@ -27,6 +27,7 @@ async def main() -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
+    settings = Settings()
     db = Database(settings.database_path)
     await db.init()
 
@@ -52,6 +53,7 @@ async def main() -> None:
         logger.error("Channel configuration check failed: %s", exc)
         await notify_admins(
             bot,
+            settings,
             "⚠️ Проверка закрытого канала не пройдена:\n"
             f"<code>{exc}</code>\n\n"
             "Бот продолжил работу, но платная ссылка может не создаваться.",
